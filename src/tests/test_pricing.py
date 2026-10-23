@@ -4,7 +4,7 @@ from typing import Dict, List, Union
 
 import pytest
 
-from claude_monitor.core.models import CostMode, TokenCounts
+from claude_monitor.core.models import CostMode, TokenCounts, normalize_model_name
 from claude_monitor.core.pricing import PricingCalculator
 
 
@@ -455,3 +455,23 @@ class TestPricingCalculator:
                 # Model name normalization might not handle all formats
                 # This is acceptable for now
                 pass
+
+
+@pytest.mark.parametrize(
+    "model, expected_input, expected_output",
+    [
+        ("claude-opus-5-5", 5.0, 25.0),
+        ("claude-sonnet-5-5", 3.0, 15.0),
+        ("claude-haiku-5-5", 1.0, 5.0),
+        ("claude-fable-5-1", 10.0, 50.0),
+    ],
+)
+def test_claude_5_models_use_current_family_rates(
+    model: str, expected_input: float, expected_output: float
+) -> None:
+    """Claude 5 ids must not fall back to the legacy Claude 3 rates."""
+    assert normalize_model_name(model) == model
+    cost = PricingCalculator().calculate_cost(
+        model=model, input_tokens=1_000_000, output_tokens=1_000_000
+    )
+    assert cost == pytest.approx(expected_input + expected_output)

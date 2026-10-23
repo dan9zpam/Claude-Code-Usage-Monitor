@@ -2,6 +2,7 @@
 Core data structures for usage tracking, session management, and token calculations.
 """
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -142,6 +143,14 @@ def normalize_model_name(model: str) -> str:
         return ""
 
     model_lower = model.lower()
+
+    # Claude 4+ ids (e.g. claude-opus-5-5, claude-fable-5-1) are already
+    # canonical; only Claude 3 names need mapping to legacy keys.
+    modern = re.search(r"(opus|sonnet|haiku|fable)-(\d{1,2})(?!\d)", model_lower)
+    if modern and int(modern.group(2)) >= 4:
+        return model_lower
+    if "fable" in model_lower:
+        return model_lower
 
     if (
         "claude-opus-4-" in model_lower
