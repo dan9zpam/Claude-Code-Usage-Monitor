@@ -40,8 +40,11 @@ from claude_monitor.output.api_usage import read_api_limits
 from claude_monitor.output.official import (
     capture_statusline,
     format_statusline,
+    read_claude_code_cache_limits,
     read_official_limits,
+    select_official_limits,
 )
+from claude_monitor.output.snapshots import SNAPSHOT_SCHEMA_VERSION
 from claude_monitor.output.state import default_state_path, write_state_file
 from claude_monitor.terminal.manager import (
     enter_alternate_screen,
@@ -174,6 +177,14 @@ def _has_fresh_limit_percentage(limits: Optional[dict]) -> bool:
     return False
 
 
+def _read_official(now_epoch: int) -> Optional[dict]:
+    """Official limits: the statusline capture, else Claude Code's usage cache."""
+    return select_official_limits(
+        read_official_limits(now_epoch=now_epoch),
+        read_claude_code_cache_limits(now_epoch=now_epoch),
+    )
+
+
 def _read_optional_api_limits(
     args: argparse.Namespace, official: Optional[dict], now_epoch: int
 ) -> Optional[dict]:
@@ -248,7 +259,7 @@ def _run_once(args: argparse.Namespace) -> int:
     )
 
     now_epoch = int(time.time())
-    official = read_official_limits(now_epoch=now_epoch)
+    official = _read_official(now_epoch)
     api_limits = _read_optional_api_limits(args, official, now_epoch)
     snapshot = build_snapshot(
         data, args, token_limit, official=official, api_limits=api_limits
@@ -282,6 +293,40 @@ def _run_once(args: argparse.Namespace) -> int:
         print("Failed to write state file (see logs)", file=sys.stderr)
         return 30
     return snapshot["status"]["code"]
+
+
+def _run_aggregate_once(args: argparse.Namespace) -> int:
+    """Print the daily/monthly aggregation as JSON and exit (``--once --view daily``)."""
+    configured_paths = getattr(args, "data_paths", [])
+    data_paths = discover_claude_data_paths(configured_paths)
+    if not data_paths:
+        print(
+            _no_data_diagnostic(_candidate_claude_paths(configured_paths)),
+            file=sys.stderr,
+        )
+        return 30
+
+    aggregator = UsageAggregator(
+        data_path=[str(path) for path in data_paths],
+        aggregation_mode=args.view,
+        timezone=args.timezone,
+        reset_hour=getattr(args, "reset_hour", None),
+        filter_models=getattr(args, "filter_models", "all"),
+    )
+    periods = aggregator.aggregate()
+    print(
+        format_json(
+            {
+                "schema_version": SNAPSHOT_SCHEMA_VERSION,
+                "tool": {"name": "claude-monitor", "version": __version__},
+                "view": args.view,
+                "timezone": args.timezone,
+                "periods": periods,
+                "totals": aggregator.calculate_totals(periods),
+            }
+        )
+    )
+    return 0 if periods else 20
 
 
 def _run_statusline() -> int:
@@ -356,6 +401,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _run_warehouse_report(args)
 
         if settings.once:
+            # Only an explicit --view daily/monthly switches to the aggregate JSON;
+            # a remembered interactive view must not change the snapshot contract.
+            view_requested = any(
+                arg == "--view" or arg.startswith("--view=") for arg in argv
+            )
+            if (
+                view_requested
+                and settings.view in ("daily", "monthly")
+                and settings.output == "json"
+            ):
+                return _run_aggregate_once(args)
             return _run_once(args)
 
         _run_monitoring(args)
@@ -499,7 +555,7 @@ def _run_monitoring(args: argparse.Namespace) -> None:
                         args, reported_limit if reported_limit else token_limit
                     )
                     now_epoch = int(time.time())
-                    official = read_official_limits(now_epoch=now_epoch)
+                    official = _read_official(now_epoch)
                     api_limits = _read_optional_api_limits(args, official, now_epoch)
                     snapshot = build_snapshot(
                         data,

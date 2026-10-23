@@ -104,12 +104,25 @@ class TestTimeFormatDetector:
         self, mock_langinfo: Mock, mock_setlocale: Mock
     ) -> None:
         """Test locale detection for 12h format with AM/PM."""
-        mock_langinfo.side_effect = lambda x: (
-            "%I:%M:%S %p" if x == locale.T_FMT_AMPM else ""
-        )
+        mock_langinfo.side_effect = lambda x: "%I:%M:%S %p" if x == locale.T_FMT else ""
 
         result = TimeFormatDetector.detect_from_locale()
         assert result is True
+
+    @patch("locale.setlocale")
+    @patch("locale.nl_langinfo")
+    def test_detect_from_locale_ignores_t_fmt_ampm(
+        self, mock_langinfo: Mock, mock_setlocale: Mock
+    ) -> None:
+        """24h locales such as ru_RU still define T_FMT_AMPM."""
+        mock_langinfo.side_effect = lambda x: {
+            locale.T_FMT_AMPM: "%I:%M:%S %p",
+            locale.T_FMT: "%H:%M:%S",
+            locale.D_T_FMT: "%A, %e %B %Y г. %X",
+        }.get(x, "")
+
+        result = TimeFormatDetector.detect_from_locale()
+        assert result is False
 
     @patch("locale.setlocale")
     @patch("locale.nl_langinfo")
@@ -188,6 +201,37 @@ class TestTimeFormatDetector:
 
         result = TimeFormatDetector.detect_from_system()
         assert result == "24h"
+
+    @patch("platform.system")
+    @patch("subprocess.run")
+    def test_detect_from_system_macos_region(
+        self, mock_run: Mock, mock_system: Mock
+    ) -> None:
+        """Without a forced clock, macOS follows the region in AppleLocale."""
+        mock_system.return_value = "Darwin"
+
+        def defaults(locale_value: str) -> List[Mock]:
+            missing = Mock(returncode=1, stdout="")
+            return [missing, missing, Mock(returncode=0, stdout=locale_value)]
+
+        mock_run.side_effect = defaults("ru_RU\n")
+        assert TimeFormatDetector.detect_from_system() == "24h"
+        mock_run.side_effect = defaults("en_US\n")
+        assert TimeFormatDetector.detect_from_system() == "12h"
+        mock_run.side_effect = defaults("en_RU@currency=USD\n")
+        assert TimeFormatDetector.detect_from_system() == "24h"
+
+    @patch("platform.system")
+    @patch("subprocess.run")
+    def test_detect_from_system_macos_forced_24h(
+        self, mock_run: Mock, mock_system: Mock
+    ) -> None:
+        mock_system.return_value = "Darwin"
+        mock_run.side_effect = [
+            Mock(returncode=1, stdout=""),
+            Mock(returncode=0, stdout="1\n"),
+        ]
+        assert TimeFormatDetector.detect_from_system() == "24h"
 
     @patch("platform.system")
     @patch("subprocess.run")

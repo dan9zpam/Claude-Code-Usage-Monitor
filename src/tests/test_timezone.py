@@ -317,7 +317,7 @@ class TestTimezonePreferenceDetection:
         """Test that _detect_timezone_time_preference delegates correctly."""
         # This function delegates to get_time_format_preference
         with patch(
-            "claude_monitor.utils.time_utils.get_time_format_preference",
+            "claude_monitor.utils.timezone.get_time_format_preference",
             return_value=True,
         ):
             result = _detect_timezone_time_preference()
@@ -329,7 +329,7 @@ class TestTimezonePreferenceDetection:
         mock_args.time_format = "24h"
 
         with patch(
-            "claude_monitor.utils.time_utils.get_time_format_preference",
+            "claude_monitor.utils.timezone.get_time_format_preference",
             return_value=False,
         ):
             result = _detect_timezone_time_preference(mock_args)

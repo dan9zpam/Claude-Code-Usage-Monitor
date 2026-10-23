@@ -266,3 +266,37 @@ def test_no_official_keeps_local_behaviour() -> None:
     assert snap["limits"]["five_hour"]["confidence"] == "local_estimate"
     assert snap["confidence"] == "local_estimate"
     assert snap["limits"]["seven_day"]["confidence"] == "unknown"
+
+
+def test_official_forecast_projects_percentage_not_local_tokens() -> None:
+    # Window 12:00-17:00; 2.5h elapsed at 75% -> 100% after another 50 minutes.
+    snap = build_snapshot(
+        _data(used=30000),  # local estimate is already past the 19k token limit
+        _args(),
+        token_limit=19000,
+        official=_official(five_pct=75.0, five_reset=1782579600),
+        now=datetime(2026, 6, 27, 14, 30, tzinfo=timezone.utc),
+    )
+
+    forecast = snap["forecast"]
+    assert forecast["basis"] == "used_percentage_pace"
+    assert forecast["confidence"] == "official"
+    assert forecast["minutes_remaining"] == 50.0
+    assert forecast["predicted_tokens_exhausted_at"].startswith("2026-06-27T15:20")
+    assert forecast["display"] == "Today 15:20"
+    assert snap["status"]["label"] == "ok"
+
+
+def test_official_forecast_within_limit_until_reset() -> None:
+    snap = build_snapshot(
+        _data(used=30000),
+        _args(),
+        token_limit=19000,
+        official=_official(five_pct=14.0, five_reset=1782579600),
+        now=datetime(2026, 6, 27, 14, 30, tzinfo=timezone.utc),
+    )
+
+    forecast = snap["forecast"]
+    assert forecast["predicted_tokens_exhausted_at"] is None
+    assert forecast["minutes_remaining"] is None
+    assert forecast["display"] == "within limit until reset"

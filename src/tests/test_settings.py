@@ -659,6 +659,48 @@ class TestSettings:
             assert settings.theme == "dark"
             mock_detector_instance.detect_background.assert_not_called()
 
+    @patch("claude_monitor.core.settings.Settings._get_system_timezone")
+    @patch("claude_monitor.core.settings.Settings._get_system_time_format")
+    def test_load_with_last_used_persists_auto_not_detected_values(
+        self, mock_time_format: Mock, mock_timezone: Mock
+    ) -> None:
+        """Auto-detected clock/timezone are re-detected next launch, not frozen."""
+        mock_timezone.return_value = "Europe/Moscow"
+        mock_time_format.return_value = "24h"
+
+        with patch("claude_monitor.core.settings.LastUsedParams") as MockLastUsed:
+            mock_instance = Mock()
+            mock_instance.load.return_value = {}
+            MockLastUsed.return_value = mock_instance
+
+            settings = Settings.load_with_last_used(["--theme", "dark"])
+
+            assert settings.time_format == "24h"
+            assert settings.timezone == "Europe/Moscow"
+            saved = mock_instance.save.call_args[0][0]
+            assert saved.time_format == "auto"
+            assert saved.timezone == "auto"
+
+    @patch("claude_monitor.core.settings.Settings._get_system_timezone")
+    @patch("claude_monitor.core.settings.Settings._get_system_time_format")
+    def test_load_with_last_used_once_does_not_persist(
+        self, mock_time_format: Mock, mock_timezone: Mock
+    ) -> None:
+        mock_timezone.return_value = "UTC"
+        mock_time_format.return_value = "24h"
+
+        with patch("claude_monitor.core.settings.LastUsedParams") as MockLastUsed:
+            mock_instance = Mock()
+            mock_instance.load.return_value = {"view": "daily"}
+            MockLastUsed.return_value = mock_instance
+
+            settings = Settings.load_with_last_used(
+                ["--once", "--view", "realtime", "--theme", "dark"]
+            )
+
+            assert settings.view == "realtime"
+            mock_instance.save.assert_not_called()
+
     def test_to_namespace(self) -> None:
         """Test conversion to argparse.Namespace."""
         settings = Settings(

@@ -198,16 +198,24 @@ class TimeFormatDetector:
         Returns:
             True for 12h format, False for 24h
         """
+        # T_FMT_AMPM is defined even in 24h locales (e.g. ru_RU), so only the
+        # locale's default formats tell us which clock it actually uses.
+        previous: Optional[str] = None
         try:
+            previous = locale.setlocale(locale.LC_TIME)
             locale.setlocale(locale.LC_TIME, "")
-            time_str: str = locale.nl_langinfo(locale.T_FMT_AMPM)
-            if time_str:
-                return True
-
-            dt_fmt: str = locale.nl_langinfo(locale.D_T_FMT)
-            return bool("%p" in dt_fmt or "%I" in dt_fmt)
+            fmts: str = locale.nl_langinfo(locale.T_FMT) + locale.nl_langinfo(
+                locale.D_T_FMT
+            )
+            return bool("%p" in fmts or "%I" in fmts or "%r" in fmts)
         except Exception:
             return False
+        finally:
+            if previous is not None:
+                try:
+                    locale.setlocale(locale.LC_TIME, previous)
+                except Exception:
+                    pass
 
     @classmethod
     def detect_from_system(cls) -> str:
@@ -228,6 +236,32 @@ class TimeFormatDetector:
                 )
                 if result.returncode == 0 and result.stdout.strip() == "1":
                     return "12h"
+
+                result = subprocess.run(
+                    ["defaults", "read", "NSGlobalDomain", "AppleICUForce24HourTime"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode == 0 and result.stdout.strip() == "1":
+                    return "24h"
+
+                result = subprocess.run(
+                    ["defaults", "read", "NSGlobalDomain", "AppleLocale"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                apple_locale: str = result.stdout.strip()
+                if result.returncode == 0 and apple_locale:
+                    country: str = apple_locale.split("@")[0].replace("-", "_")
+                    country = country.split("_")[-1].upper()
+                    if len(country) == 2:
+                        return (
+                            "12h"
+                            if country in TimeFormatDetector.TWELVE_HOUR_COUNTRIES
+                            else "24h"
+                        )
 
                 date_result: subprocess.CompletedProcess[str] = subprocess.run(
                     ["date", "+%r"], capture_output=True, text=True, check=True
@@ -460,9 +494,14 @@ class TimezoneHandler:
 
         dt = self.ensure_timezone(dt)
 
-        fmt: str = "%Y-%m-%d %I:%M:%S %p %Z" if use_12_hour else "%Y-%m-%d %H:%M:%S %Z"
+        if use_12_hour:
+            return dt.strftime(f"%Y-%m-%d %I:%M:%S {_meridiem(dt)} %Z")
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
-        return dt.strftime(fmt)
+
+def _meridiem(dt: datetime) -> str:
+    """AM/PM marker; strftime's %p is empty in locales without one (e.g. ru_RU)."""
+    return "AM" if dt.hour < 12 else "PM"
 
 
 def get_time_format_preference(args: Any = None) -> bool:
@@ -518,16 +557,10 @@ def format_display_time(
         use_12h_format = get_time_format_preference()
 
     if use_12h_format:
+        hour: int = dt_obj.hour % 12 or 12
         if include_seconds:
-            try:
-                return dt_obj.strftime("%-I:%M:%S %p")
-            except ValueError:
-                return dt_obj.strftime("%#I:%M:%S %p")
-        else:
-            try:
-                return dt_obj.strftime("%-I:%M %p")
-            except ValueError:
-                return dt_obj.strftime("%#I:%M %p")
+            return f"{hour}:{dt_obj:%M:%S} {_meridiem(dt_obj)}"
+        return f"{hour}:{dt_obj:%M} {_meridiem(dt_obj)}"
     elif include_seconds:
         return dt_obj.strftime("%H:%M:%S")
     else:

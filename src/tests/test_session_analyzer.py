@@ -317,6 +317,21 @@ class TestSessionAnalyzer:
             assert "type" in result
             assert "message" in result
 
+    def test_detect_single_limit_ignores_slash_command_output(self) -> None:
+        """/usage output mentions limits but is not a limit being hit."""
+        analyzer = SessionAnalyzer()
+        raw_data = {
+            "type": "system",
+            "subtype": "local_command",
+            "timestamp": "2024-01-01T12:00:00Z",
+            "content": (
+                "<local-command-stdout>Current session: 9% used\n"
+                "What's contributing to your limits usage?</local-command-stdout>"
+            ),
+        }
+
+        assert analyzer._detect_single_limit(raw_data) is None
+
     def test_detect_single_limit_opus_limit(self) -> None:
         """Test _detect_single_limit with Opus daily limit."""
         analyzer = SessionAnalyzer()

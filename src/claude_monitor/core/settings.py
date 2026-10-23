@@ -512,9 +512,14 @@ class Settings(BaseSettings):
             ):
                 settings.custom_limit_tokens = None
 
+        # Remember which values were auto-resolved so the "auto" intent (not the
+        # value detected today) is what gets persisted for the next launch.
+        persist_auto: Dict[str, str] = {}
         if settings.timezone in ("auto", "local"):
+            persist_auto["timezone"] = settings.timezone
             settings.timezone = cls._get_system_timezone()
         if settings.time_format == "auto":
+            persist_auto["time_format"] = "auto"
             settings.time_format = cls._get_system_time_format()
 
         if settings.debug:
@@ -537,14 +542,16 @@ class Settings(BaseSettings):
             else:
                 settings.theme = "auto"
 
-        if not clear_config:
+        # One-shot runs are automation (scripts, the menu bar app); they read the
+        # last-used profile but must not overwrite the interactive one.
+        if not clear_config and not settings.once:
             last_used = LastUsedParams()
             # Persist the user's "auto" intent (not the resolved light/dark) so
             # background auto-detection keeps running on the next launch.
+            if theme_was_auto:
+                persist_auto["theme"] = "auto"
             to_persist = (
-                settings.model_copy(update={"theme": "auto"})
-                if theme_was_auto
-                else settings
+                settings.model_copy(update=persist_auto) if persist_auto else settings
             )
             last_used.save(to_persist)
 

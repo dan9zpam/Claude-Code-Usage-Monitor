@@ -1,12 +1,19 @@
 """Tests for the opt-in experimental Anthropic OAuth usage API reader."""
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from claude_monitor.output.api_usage import API_TTL_SECONDS, read_api_limits
+from claude_monitor.output import api_usage
+from claude_monitor.output.api_usage import (
+    API_TTL_SECONDS,
+    read_api_limits,
+    read_oauth_token,
+)
 
 
 class _Response:
@@ -114,11 +121,11 @@ def test_read_api_limits_normalizes_response_and_writes_cache(
     opener = _Opener(
         {
             "five_hour": {
-                "utilization": 0.42,
+                "utilization": 42,
                 "resets_at": "2026-06-27T17:00:00Z",
             },
             "seven_day": {
-                "utilization": 0.91,
+                "utilization": 91.0,
                 "resets_at": "2026-07-04T17:00:00Z",
             },
         }
@@ -180,3 +187,60 @@ def test_retry_after_blocks_fetch_and_marks_old_cache_stale(tmp_path: Path) -> N
     assert out["stale"] is True
     assert out["five_hour"]["used_percentage"] is None
     assert out["five_hour"]["resets_at_epoch"] == 1300
+
+
+def test_small_utilization_is_percent_not_fraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real 1% must not be scaled to 100% as if it were a fraction."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-token")
+    out = read_api_limits(
+        enabled=True,
+        cache_path=tmp_path / "api.json",
+        now_epoch=2000,
+        opener=_Opener(
+            {
+                "five_hour": {"utilization": 1, "resets_at": 9000},
+                "seven_day": {"utilization": 0.5, "resets_at": 9000},
+            }
+        ),
+    )
+
+    assert out is not None
+    assert out["five_hour"]["used_percentage"] == 1.0
+    assert out["seven_day"]["used_percentage"] == 0.5
+
+
+def test_read_oauth_token_falls_back_to_macos_keychain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(api_usage.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps({"claudeAiOauth": {"accessToken": "kc-token"}})
+        )
+
+    monkeypatch.setattr(api_usage.subprocess, "run", fake_run)
+
+    assert read_oauth_token() == "kc-token"
+    assert calls[0][:3] == ["security", "find-generic-password", "-s"]
+    assert "Claude Code-credentials" in calls[0]
+
+
+def test_read_oauth_token_explicit_path_skips_keychain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        api_usage.subprocess,
+        "run",
+        lambda *_a, **_k: pytest.fail("keychain must not be queried"),
+    )
+
+    assert read_oauth_token(tmp_path / "missing.json") is None

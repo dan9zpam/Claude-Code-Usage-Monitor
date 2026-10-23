@@ -60,9 +60,12 @@ def _external_block(
     }
 
 
-def _official_block(window: Dict[str, Any]) -> Dict[str, Any]:
-    """A ``limits.*`` block sourced from the official statusline ``rate_limits``."""
-    return _external_block(window, _STATUSLINE, _OFFICIAL)
+def _official_block(
+    window: Dict[str, Any], source_kind: str = _STATUSLINE
+) -> Dict[str, Any]:
+    """A ``limits.*`` block sourced from official limits (statusline ``rate_limits``
+    or Claude Code's own usage cache)."""
+    return _external_block(window, source_kind, _OFFICIAL)
 
 
 def _api_block(window: Dict[str, Any]) -> Dict[str, Any]:
@@ -162,6 +165,54 @@ def _pace_from_window(window: Dict[str, Any], now: datetime) -> Dict[str, Any]:
         "source": source,
         "confidence": confidence,
     }
+
+
+def _forecast_from_window(
+    window: Dict[str, Any], now: datetime, confidence: str
+) -> Dict[str, Any]:
+    """Project when a percentage-based five-hour window reaches 100%.
+
+    Assumes the usage rate so far in the window continues. When the projection
+    lands after the reset, nothing is exhausted (``display`` says so).
+    """
+    used_pct = window.get("used_percentage")
+    reset_epoch = window.get("resets_at_epoch")
+    forecast: Dict[str, Any] = {
+        "predicted_tokens_exhausted_at": None,
+        "predicted_tokens_exhausted_epoch": None,
+        "tokens_remaining": None,
+        "minutes_remaining": None,
+        "basis": "used_percentage_pace",
+        "confidence": confidence,
+        "display": None,
+    }
+    if used_pct is None or reset_epoch is None:
+        forecast["confidence"] = _UNKNOWN
+        return forecast
+
+    reset_at = datetime.fromtimestamp(reset_epoch, timezone.utc)
+    elapsed = (now - (reset_at - timedelta(seconds=_FIVE_HOUR_SECONDS))).total_seconds()
+    if used_pct >= 100:
+        forecast["minutes_remaining"] = 0
+        return forecast
+    if used_pct <= 0 or elapsed <= 0:
+        forecast["display"] = "within limit until reset"
+        return forecast
+
+    seconds_left = (100 - float(used_pct)) / (float(used_pct) / elapsed)
+    exhausted = now + timedelta(seconds=seconds_left)
+    if exhausted >= reset_at:
+        forecast["display"] = "within limit until reset"
+        return forecast
+    forecast.update(
+        {
+            "predicted_tokens_exhausted_at": exhausted.isoformat(),
+            "predicted_tokens_exhausted_epoch": int(exhausted.timestamp()),
+            "minutes_remaining": round(seconds_left / 60, 1),
+            "display": _format_forecast_display(exhausted, now, confidence),
+        }
+    )
+    return forecast
 
 
 def _status(active: Optional[dict], used_pct: Optional[float]) -> tuple[int, str]:
@@ -375,15 +426,16 @@ def build_snapshot(
     # estimate, keeping the stale flag only as a transparency signal.
     official_had_percentage = False
     if official and not official.get("stale"):
+        official_kind = (official.get("source") or {}).get("kind") or _STATUSLINE
         off_five = official.get("five_hour") or {}
         if off_five.get("used_percentage") is not None:
-            five_hour = _official_block(off_five)
+            five_hour = _official_block(off_five, official_kind)
             status_pct = off_five["used_percentage"]
             headline_confidence = _OFFICIAL
             official_had_percentage = True
         off_seven = official.get("seven_day") or {}
         if off_seven.get("used_percentage") is not None:
-            seven_day = _official_block(off_seven)
+            seven_day = _official_block(off_seven, official_kind)
             # Weekly exhaustion limits usage too: let the higher of the two
             # official windows drive the exit status.
             seven_pct = off_seven["used_percentage"]
@@ -410,6 +462,11 @@ def build_snapshot(
         snapshot_stale = True
     if api_limits and api_limits.get("stale") and not official_had_percentage:
         snapshot_stale = True
+
+    if headline_confidence != _LOCAL:
+        # The local token forecast is measured against the (estimated) plan token
+        # limit; once the limit itself is official, project its percentage instead.
+        forecast = _forecast_from_window(five_hour, current_time, headline_confidence)
 
     code, label = _status(active, status_pct)
     if label == "limit_hit":

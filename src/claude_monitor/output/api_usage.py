@@ -12,6 +12,8 @@ import json
 import logging
 import math
 import os
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -26,6 +28,7 @@ API_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_TTL_SECONDS = 180
 API_KIND = "anthropic_oauth_usage_api"
 _BETA_HEADER = "oauth-2025-04-20"
+_KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 
 def default_api_cache_path() -> Path:
@@ -62,7 +65,10 @@ def _utilization_to_pct(value: Any) -> Optional[float]:
         return None
     if not math.isfinite(value) or value < 0:
         return None
-    pct = float(value) * 100 if value <= 1 else float(value)
+    # The endpoint reports utilization in percent (Claude Code caches the same
+    # response with e.g. ``"utilization": 7``); scaling values <= 1 as fractions
+    # turned a real 1% into 100%.
+    pct = float(value)
     if pct > 100:
         return 100.0 if pct <= 101 else None
     return round(pct, 1)
@@ -187,10 +193,32 @@ def read_oauth_token(credentials_path: Optional[Path] = None) -> Optional[str]:
 
     path = credentials_path or (Path.home() / ".claude" / ".credentials.json")
     try:
-        payload = json.loads(path.read_text())
+        return _token_from_payload(json.loads(path.read_text()))
     except (OSError, ValueError):
+        pass
+    if credentials_path is None and sys.platform == "darwin":
+        return _keychain_token()
+    return None
+
+
+def _keychain_token() -> Optional[str]:
+    """Claude Code on macOS keeps its OAuth credentials in the login keychain."""
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
-    return _token_from_payload(payload)
+    if result.returncode != 0:
+        return None
+    try:
+        return _token_from_payload(json.loads(result.stdout))
+    except ValueError:
+        return None
 
 
 def _retry_after_epoch(value: Optional[str], now_epoch: int) -> Optional[int]:

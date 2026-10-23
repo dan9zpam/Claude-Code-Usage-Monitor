@@ -9,6 +9,16 @@ import pytest
 from claude_monitor.core.models import CostMode, UsageEntry
 
 
+@pytest.fixture(autouse=True)
+def _isolate_claude_config(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the real ~/.claude.json usage cache out of tests."""
+    monkeypatch.setenv(
+        "CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude_config"))
+    )
+
+
 @pytest.fixture
 def mock_pricing_calculator() -> Mock:
     """Mock PricingCalculator for testing."""

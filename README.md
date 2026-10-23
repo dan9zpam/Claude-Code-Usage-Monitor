@@ -254,6 +254,8 @@ The monitor automatically saves your preferences to avoid re-specifying them on 
 
 **Configuration Location:** ~/.claude-monitor/last_used.json
 
+Auto-detected values (`--timezone auto`, `--time-format auto`, `--theme auto`) are saved as `auto` and re-detected on each launch.
+
 **Usage Examples:**
 ```bash
 # First run - specify preferences
@@ -313,9 +315,12 @@ claude-monitor --write-state --state-file ~/.claude-monitor/state/latest.json
 
 # Install as a Claude Code statusline hook to capture official rate_limits
 claude-monitor --statusline
+
+# Daily / monthly totals as JSON (periods + totals)
+claude-monitor --once --view daily --output json
 ```
 
-`--once` exits with automation-friendly codes: `0` ok, `10` near limit, `11` limit hit, `20` indeterminate/no active session, and `30` no data or config error. When official statusline data is fresh it wins; otherwise the snapshot falls back to a labeled local estimate.
+`--once` exits with automation-friendly codes: `0` ok, `10` near limit, `11` limit hit, `20` indeterminate/no active session, and `30` no data or config error. Official limits come from a fresh statusline capture or, failing that, from the utilization Claude Code caches in `~/.claude.json` (refreshed whenever Claude Code fetches usage, e.g. `/usage`; source kind `claude_code_cache`). When neither is fresh the snapshot falls back to a labeled local estimate. With official limits the forecast projects the official percentage (`basis: used_percentage_pace`). `--once` runs read but never rewrite `last_used.json`.
 
 ### Persistent Usage Warehouse
 

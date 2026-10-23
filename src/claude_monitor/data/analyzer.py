@@ -272,6 +272,14 @@ class SessionAnalyzer:
         if not isinstance(content, str):
             return None
 
+        # Output of a user-run slash command (e.g. /usage prints "...limits
+        # usage...") reports on limits; it is not Claude Code hitting one.
+        if (
+            raw_data.get("subtype") == "local_command"
+            or "<local-command-stdout>" in content
+        ):
+            return None
+
         content_lower = content.lower()
         if "limit" not in content_lower and "rate" not in content_lower:
             return None

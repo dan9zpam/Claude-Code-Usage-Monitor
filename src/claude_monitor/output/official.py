@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -110,6 +111,100 @@ def read_official_limits(
         "captured_at_epoch": captured,
         "stale": bool(stale),
     }
+
+
+# Claude Code caches the account's live utilization in its own config file
+# (``~/.claude.json`` -> ``cachedUsageUtilization``) and refreshes it whenever it
+# fetches usage (e.g. ``/usage``). It is the same server-side number the
+# statusline reports, so it is an official fallback when no capture exists.
+CLAUDE_CACHE_KIND = "claude_code_cache"
+CLAUDE_CACHE_TTL_SECONDS = 3600
+
+
+def default_claude_config_path() -> Path:
+    """Claude Code's global config file (honors ``CLAUDE_CONFIG_DIR``)."""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir).expanduser() / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
+def _iso_epoch(value: Any) -> Optional[int]:
+    if not isinstance(value, str) or not value:
+        return _finite_int(value)
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _cache_window(raw: Any, now_epoch: Optional[int]) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+    return _window(
+        {
+            "used_percentage": raw.get("utilization"),
+            "resets_at": _iso_epoch(raw.get("resets_at")),
+        },
+        now_epoch,
+    )
+
+
+def read_claude_code_cache_limits(
+    path: Optional[Path] = None, now_epoch: Optional[int] = None
+) -> Optional[Dict[str, Any]]:
+    """Read the utilization Claude Code cached in its config file.
+
+    Returns the same shape as :func:`read_official_limits` (plus ``source``), or
+    ``None`` when the file or the cache block is missing.
+    """
+    path = path or default_claude_config_path()
+    try:
+        payload = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    cache = payload.get("cachedUsageUtilization") if isinstance(payload, dict) else None
+    if not isinstance(cache, dict) or not isinstance(cache.get("utilization"), dict):
+        return None
+    utilization = cache["utilization"]
+
+    fetched_ms = _finite_int(cache.get("fetchedAtMs"))
+    captured = fetched_ms // 1000 if fetched_ms is not None else None
+    stale = now_epoch is not None and (
+        captured is None or (now_epoch - captured) > CLAUDE_CACHE_TTL_SECONDS
+    )
+    return {
+        "five_hour": _cache_window(utilization.get("five_hour"), now_epoch),
+        "seven_day": _cache_window(utilization.get("seven_day"), now_epoch),
+        "captured_at_epoch": captured,
+        "stale": bool(stale),
+        "source": {"kind": CLAUDE_CACHE_KIND},
+    }
+
+
+def _has_fresh_percentage(limits: Optional[Dict[str, Any]]) -> bool:
+    if not limits or limits.get("stale"):
+        return False
+    return any(
+        isinstance(limits.get(key), dict)
+        and limits[key].get("used_percentage") is not None
+        for key in ("five_hour", "seven_day")
+    )
+
+
+def select_official_limits(
+    statusline: Optional[Dict[str, Any]], claude_cache: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Pick the best official source: a fresh statusline capture, else a fresh
+    Claude Code cache, else whatever (possibly stale) statusline data exists."""
+    if _has_fresh_percentage(statusline):
+        return statusline
+    if _has_fresh_percentage(claude_cache):
+        return claude_cache
+    return statusline
 
 
 def capture_statusline(

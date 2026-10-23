@@ -271,3 +271,64 @@ def test_once_compact_prints_single_line(capsys: pytest.CaptureFixture) -> None:
     out = capsys.readouterr().out.strip()
     assert "\n" not in out
     assert out.startswith("claude") and "%" in out and "reset" in out
+
+
+def test_once_uses_claude_code_cache_when_no_statusline_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import time
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    (tmp_path / ".claude.json").write_text(
+        json.dumps(
+            {
+                "cachedUsageUtilization": {
+                    "fetchedAtMs": int(time.time()) * 1000,
+                    "utilization": {
+                        "five_hour": {
+                            "utilization": 12,
+                            "resets_at": "2999-01-01T00:00:00+00:00",
+                        },
+                        "seven_day": None,
+                    },
+                }
+            }
+        )
+    )
+
+    rc = _run(_args("json"), _payload(total=20000))  # local estimate says >100%
+    doc = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert doc["confidence"] == "official"
+    assert doc["limits"]["five_hour"]["used_percentage"] == 12.0
+    assert doc["limits"]["five_hour"]["source"] == {"kind": "claude_code_cache"}
+
+
+def test_once_daily_json_prints_periods(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    periods = [{"date": "2026-10-23", "total_cost": 1.5, "entries_count": 3}]
+
+    class _FakeAggregator:
+        def __init__(self, **kwargs: Any) -> None:
+            assert kwargs["aggregation_mode"] == "daily"
+
+        def aggregate(self) -> list:
+            return periods
+
+        def calculate_totals(self, data: list) -> dict:
+            return {"total_cost": 1.5}
+
+    args = argparse.Namespace(output="json", view="daily", timezone="UTC")
+    with (
+        patch.object(cli_main, "discover_claude_data_paths", return_value=[Path("/x")]),
+        patch.object(cli_main, "UsageAggregator", _FakeAggregator),
+    ):
+        rc = cli_main._run_aggregate_once(args)
+
+    doc = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert doc["view"] == "daily"
+    assert doc["periods"] == periods
+    assert doc["totals"] == {"total_cost": 1.5}

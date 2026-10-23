@@ -8,7 +8,9 @@ from claude_monitor.output.official import (
     capture_statusline,
     default_statusline_path,
     format_statusline,
+    read_claude_code_cache_limits,
     read_official_limits,
+    select_official_limits,
 )
 
 
@@ -255,3 +257,74 @@ def test_format_statusline_survives_nondict_shapes() -> None:
     """Valid JSON with unexpected types must not raise (the hook can't crash)."""
     line = format_statusline({"model": "Opus"}, {"rate_limits": {"five_hour": "bad"}})
     assert line == "claude-monitor"
+
+
+def _claude_config(path: Path, fetched_at_epoch: int) -> None:
+    _write(
+        path,
+        {
+            "cachedUsageUtilization": {
+                "fetchedAtMs": fetched_at_epoch * 1000,
+                "utilization": {
+                    "five_hour": {
+                        "utilization": 7,
+                        "resets_at": "1970-01-01T01:00:00+00:00",
+                    },
+                    "seven_day": {
+                        "utilization": 6,
+                        "resets_at": "1970-01-02T00:00:00.5+00:00",
+                    },
+                },
+            }
+        },
+    )
+
+
+def test_claude_code_cache_reader(tmp_path: Path) -> None:
+    f = tmp_path / ".claude.json"
+    _claude_config(f, fetched_at_epoch=1000)
+
+    out = read_claude_code_cache_limits(f, now_epoch=1100)
+
+    assert out is not None
+    assert out["source"] == {"kind": "claude_code_cache"}
+    assert out["five_hour"] == {"used_percentage": 7.0, "resets_at_epoch": 3600}
+    assert out["seven_day"] == {"used_percentage": 6.0, "resets_at_epoch": 86400}
+    assert out["captured_at_epoch"] == 1000
+    assert out["stale"] is False
+
+
+def test_claude_code_cache_reader_missing_or_stale(tmp_path: Path) -> None:
+    assert read_claude_code_cache_limits(tmp_path / "x.json", now_epoch=1) is None
+    f = tmp_path / ".claude.json"
+    _write(f, {"projects": {}})
+    assert read_claude_code_cache_limits(f, now_epoch=1) is None
+
+    _claude_config(f, fetched_at_epoch=0)
+    out = read_claude_code_cache_limits(f, now_epoch=3500)
+    assert out is not None and out["stale"] is False
+    _claude_config(f, fetched_at_epoch=0)
+    out = read_claude_code_cache_limits(f, now_epoch=3601)
+    # expired five-hour window is dropped; the capture itself is now stale
+    assert out is not None and out["stale"] is True
+    assert out["five_hour"]["used_percentage"] is None
+
+
+def test_select_official_prefers_fresh_statusline_then_cache() -> None:
+    fresh_window = {"used_percentage": 5.0, "resets_at_epoch": 10}
+    statusline = {"five_hour": fresh_window, "seven_day": None, "stale": False}
+    stale_statusline = {**statusline, "stale": True}
+    empty_statusline = {"five_hour": None, "seven_day": None, "stale": False}
+    cache = {
+        "five_hour": {"used_percentage": 9.0, "resets_at_epoch": 10},
+        "seven_day": None,
+        "stale": False,
+        "source": {"kind": "claude_code_cache"},
+    }
+
+    assert select_official_limits(statusline, cache) is statusline
+    assert select_official_limits(stale_statusline, cache) is cache
+    assert select_official_limits(empty_statusline, cache) is cache
+    assert select_official_limits(None, cache) is cache
+    assert select_official_limits(stale_statusline, None) is stale_statusline
+    assert select_official_limits(None, {**cache, "stale": True}) is None
